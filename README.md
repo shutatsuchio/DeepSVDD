@@ -1,3 +1,2 @@
 # DeepSVDD
-Hello!!
-code of DeeoSVDD.
+DeepSVDD.
