@@ -1,25 +1,115 @@
-using UnityEngine;
+画像取得とダウンサンプリング
+元フレーム: 解像度 (W, H) の RGBA 画像 I(x, y)。
 
-public class AppManager : MonoBehaviour
-{
-    void Update()
-    {
-        // PCのEscapeキーは、Androidデバイス（Questなど）では「戻る」ボタンに対応します。
-        if (Input.GetKeyDown(KeyCode.Escape))
-        {
-            // アプリケーションを終了します。
-            QuitApplication();
-        }
-    }
+sampleFactor = s (>0) のとき、ターゲット解像度: W' = floor(W / s), H' = floor(H / s)
 
-    private void QuitApplication()
-    {
-#if UNITY_EDITOR
-        // Unityエディタで実行している場合は、再生を停止します。
-        UnityEditor.EditorApplication.isPlaying = false;
-#else
-        // ビルドされたアプリケーションの場合は、アプリを終了します。
-        Application.Quit();
-#endif
-    }
-}
+ComputeShader で各出力ピクセル (x', y') に対し元画像対応座標を x = x' * s + δx y = y' * s + δy （δx, δy はサンプリング中心補正。単純版は δ = s/2 か 0）
+
+輝度 (グレースケール) への変換（例: BT.601） Y(x,y) = 0.299 R + 0.587 G + 0.114 B 結果は 8bit (Gray8) バッファ G(x', y')。
+
+Binarization（ZXing HybridBinarizer の概念）
+HybridBinarizer は画像をブロックに分割し、各ブロック内で局所閾値 T_b を推定し B(x',y') = 1 (明領域) if G(x',y') ≤ T_b 0 (暗領域) otherwise （実装細部は適応的手法。ここでは局所的二値化により照明ムラを軽減）
+
+QRコード検出 (Finder Pattern)
+Finder Pattern 行方向・列方向のラン長（連続ピクセル数）シーケンスが 1:1:3:1:1 比率に近い並びを探索。
+単純化した一次元走査での条件例: 比率候補 (a,b,c,d,e)、総和 S = a+b+c+d+e 近似条件: |a - S/7| < ε, |b - S/7| < ε, |c - 3S/7| < ε, |d - S/7| < ε, |e - S/7| < ε 複数方向（水平・垂直）一致から Finder パターン中心候補を得る。3 つの Finder パターン位置 F1, F2, F3 をクラスタリングで確定。
+
+Alignment Pattern (遠距離や歪み補正用) が見つかれば追加で位置 A。
+
+射影幾何とホモグラフィ (2D QR 平面 → 画像平面)
+QR コード自体を理想化し、コード平面上の規格化角 (正方形) を: P0 = (0, 0), P1 = (L, 0), P2 = (L, L), P3 = (0, L) （L は正方形の物理長さ、あるいは単位 1 に正規化でも良い）
+
+画像上で対応する検出コーナーを p0 = (u0, v0), …, p3 = (u3, v3)
+
+射影変換（ホモグラフィ）H (3x3, スケール除いて 8 自由度) は λ [u; v; 1] = H [X; Y; 1] DLT(Direct Linear Transform) で解く。各対応から線形方程式を構築し SVD で最小固有値ベクトル → H。
+
+カメラ内部パラメータとピクセル → 正規化座標
+カメラ内部行列: K = | f_x 0 c_x | | 0 f_y c_y | | 0 0 1 |
+
+ピクセル座標 (u, v) を正規化画像座標 (x_n, y_n): x_n = (u - c_x) / f_x y_n = (v - c_y) / f_y
+
+方向ベクトル（カメラ座標系）: d_cam = normalize( [x_n, y_n, 1] )
+
+カメラのワールド姿勢 (R_wc, t_wc) が既知（HMDのトラッキングから）なら レイ原点 o_w = t_wc レイ方向 d_w = R_wc * d_cam
+
+（PassthroughCameraUtils.ScreenPointToRayInWorld が内部でこれを行い Ray を返しているイメージ）
+
+コーナーのワールド座標推定（平面 or メッシュ 交差）
+(A) 平面既知の場合（法線 n, 平面上の点 p0）: レイ: r(t) = o_w + t d_w 方程式: n · (p0 - o_w) = t (n · d_w) t = n·(p0 - o_w) / (n·d_w) 交点: P_w = o_w + t d_w
+
+(B) メッシュレイキャストの場合: 各三角形 (v0, v1, v2) に対し Möller–Trumbore 法で交点を計算し、最小 t > 0 を採用。
+
+(C) レイキャスト失敗時に距離補完: 既に中心で得た距離 d_c を用い P_w ≈ o_w + d_c * d_w
+
+ホモグラフィからの姿勢推定（平面 Pose 推定）
+H が求まっていて、内部行列 K が既知なら（タグの実寸 L も必要）:
+
+K^{-1} H = [h1 h2 h3] （列ベクトル） λ = 1 / ||K^{-1} h1|| = 1 / ||K^{-1} h2|| （理想的には同値、平均可） r1 = λ K^{-1} h1 r2 = λ K^{-1} h2 r3 = r1 × r2 t = λ K^{-1} h3
+
+R_raw = [r1 r2 r3] を正規直交化（SVD して最も近い回転行列に補正）→ R Pose: (R, t)
+
+サンプルでは Plane 射影や PerCorner Raycast で直接 3D 点を得ているため、 PnP / ホモグラフィを明示的に使わずとも: p0, p1, p2, p3 (世界) から v1 = (p1 - p0), v2 = (p3 - p0) あるいは隣接2辺を正規化し e1 = normalize(v1) e2 = normalize(v2 - (e1·v2) e1) （Gram-Schmidt） e3 = e1 × e2 R = [e1 e2 e3] 中心 c = (p0 + p1 + p2 + p3)/4
+
+UV 正規化とダウンサンプリング時の座標変換
+ダウンサンプル後に ZXing から得た座標 (x', y') は (0..W'-1, 0..H'-1)。
+元解像度に戻す: x = x' * (W / W') y = y' * (H / H') 正規化 UV: u_norm = x / W v_norm = y / H
+
+サンプルの旧実装では x'/W', y'/H' をそのまま UV として使うと、実際のカメラ空間基準とズレる点に注意。修正版では adjustUVToOriginal = true で補正。
+
+トラッキング（フレーム間安定化）の数学（拡張案）
+(1) 時間的平滑化 (位置): c_t_filtered = α c_t + (1 - α) c_{t-1_filtered}, 0 < α ≤ 1
+
+(2) 回転 (Quaternion) の指数移動平均: q_t_filtered = slerp(q_{t-1_filtered}, q_t_raw, α)
+
+(3) コード消失判定: 最終検出時刻 τ_last 現在時刻 τ_now if (τ_now - τ_last > T_timeout) → 破棄
+
+(4) ラベルマッチング: デコード文字列 text をキーに辞書 文字列が同じでも位置が大きく飛ぶ場合: 距離 Δ = ||c_t - c_{t-1}|| 阈値 Δ_max 超過なら新規出現とみなすなど
+
+(5) 過去フレーム補間: 観測欠落フレームで速度 v 推定: v ≈ (c_t - c_{t-1}) / Δt 予測位置 c_{t+Δt_pred} = c_t + v * Δt_pred
+
+面積・スケール推定（距離/安定性評価）
+四角形の平均辺長: s1 = ||p1 - p0|| s2 = ||p2 - p1|| s3 = ||p3 - p2|| s4 = ||p0 - p3|| s_avg = (s1 + s2 + s3 + s4)/4
+
+推定法線: n = normalize( (p1 - p0) × (p3 - p0) )
+
+姿勢信頼度例（簡易）: flatness = || (p2 - p0) + (p3 - p1) || （対角線の中点一致性） aspect = s1 / s2 （1 に近いほど正方性高い） confidence = w1 * clamp(1 - |aspect - 1|) + w2 * someContrastMetric
+
+PnP を用いた別アプローチ（レイキャストなし）
+物理サイズ L を知っている場合、 タグの 3D モデル点（カメラ座標系基準）: P0 = (0, 0, 0) P1 = (L, 0, 0) P2 = (L, L, 0) P3 = (0, L, 0)
+
+対応する画像点 u_i = (u_i, v_i) を用い EPnP / SolvePnP: minimize Σ || projection(K, R P_i + t) - u_i ||^2 結果 (R, t) で直接 Pose 推定。
+
+SolvePnP (線形→反復最適化) の反復: R, t 更新 ← Levenberg–Marquardt
+
+誤差とスケールの要点
+(1) ダウンサンプリング誤差: 位置誤差 ~ s/2 ピクセル (最近傍サンプリング想定) → 角度誤差は視野角に比例 (2) レイキャスト誤差: 平面法線 n 推定誤差 δn が距離推定を歪める: 交点誤差 δt ≈ (δn · (p0 - o_w))/(n·d_w) - ((n·(p0 - o_w))(δn·d_w))/(n·d_w)^2 (3) PnP の再投影誤差: reprojection_error = sqrt( (1/N) Σ ||u_i - proj(R,t,P_i)||^2 )
+
+まとめフロー（数式対応）
+(1) I → ダウンサンプル → G
+(2) 適応二値化 → B
+(3) Finder pattern 検出 → コーナー近傍推定 → p_i
+(4) (オプション) H 推定, もしくは p_i からレイ生成
+(5) レイ × 環境平面 / メッシュ → P_i (world)
+(6) R, c 推定: エッジ正規化 + 外積 → 右手直交基
+(7) 平滑化: EMA / Slerp
+(8) 表示更新 / 追跡辞書管理
+
+実装上の注意を数式と照らして改善できる点
+UV 正規化: 必ず元解像度基準 (u/W, v/H) に統一 ⇒ レイ計算の一貫性
+複数コード安定化: 直近 k フレームでの角点集合のクラスタリング (k-means の初期値に前フレーム)
+姿勢補正: R_raw の列ベクトル r1, r2 異方性時 r1' = r1 / ||r1||
+r2_temp = r2 - (r1'·r2) r1'
+r2' = r2_temp / ||r2_temp||
+r3' = r1' × r2'
+R = [r1' r2' r3']
+応用：マーカー基準座標系へ他オブジェクトを配置
+オブジェクトを QR 中心に置く: T_world = [ R c 0 0 0 1 ] 点 q (マーカー局所座標, 例 (L/2, L/2, 0)) のワールド位置: Q_world = R q + c
+
+よくある混乱点の数式的指摘
+GenericMultipleBarcodeReader が複数検出漏れを起こすのは H 推定前の候補抽出段階（Finderパターン組合せ探索）範囲が限定されるため。これは数式よりもアルゴリズム内部ヒューリスティックの問題。
+ダウンサンプリング後の角点座標を「そのまま W,H で正規化」すると (x'/W) ≠ (x/W) になるのでレイ方向がズレる。補正因子は (W/W') で拡大してから正規化する必要。
+追加の高度化（必要に応じて）
+カルマンフィルタ: 状態 x = [c, v, quaternion(姿勢)] を拡張カルマンで推定。観測 z = c_measured, R_measured。
+外れ値除去: RANSAC でホモグラフィ H を推定し外れ角点除去後に最終 Pose 推定。
+補足や特定ステップのコード化（例: DLT や Ray-Plane Intersection の実装例）をご希望なら続けて指示ください。
+どの部分をさらに深掘りしたいですか？（PnP の詳細 / カルマンフィルタ / ZXing FinderPattern 検出 など）
