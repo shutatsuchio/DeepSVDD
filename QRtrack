@@ -1,74 +1,25 @@
 using UnityEngine;
-using System.Collections.Generic; // Listを使うために必要
 
-public class QRCodeTracker : MonoBehaviour
+public class AppManager : MonoBehaviour
 {
-    // Unityエディタ上で、生成したい3Dモデル（プレハブ）をここに設定します。
-    public GameObject objectToSpawn;
-
-    // 生成したオブジェクトを管理するためのリスト
-    private Dictionary<System.Guid, GameObject> spawnedObjects = new Dictionary<System.Guid, GameObject>();
-
-    // このスクリプトが有効になった時に一度だけ呼ばれます
-    void OnEnable()
+    void Update()
     {
-        // MRUKに「追跡可能なもの（Trackable）が新しく追加されたら教えて」とお願いする
-        MRUK.Instance.TrackableAdded += OnTrackableAdded;
-        // MRUKに「追跡中のものが更新されたら教えて」とお願いする
-        MRUK.Instance.TrackableUpdated += OnTrackableUpdated;
-        // MRUKに「追跡中のものが削除されたら教えて」とお願いする
-        MRUK.Instance.TrackableRemoved += OnTrackableRemoved;
-    }
-
-    // このスクリプトが無効になった時に呼ばれます
-    void OnDisable()
-    {
-        // 上でお願いしたことを解除します（お行儀が良い作法です）
-        MRUK.Instance.TrackableAdded -= OnTrackableAdded;
-        MRUK.Instance.TrackableUpdated -= OnTrackableUpdated;
-        MRUK.Instance.TrackableRemoved -= OnTrackableRemoved;
-    }
-
-    // MRUKが新しい何か（壁、天井、QRコードなど）を見つけた時に呼ばれる関数
-    private void OnTrackableAdded(MRUK.Trackable trackable)
-    {
-        // 見つかったものがQRコードかどうかをチェック
-        if (trackable.IsTrackableType(MRUK.TrackableType.QrCode))
+        // PCのEscapeキーは、Androidデバイス（Questなど）では「戻る」ボタンに対応します。
+        if (Input.GetKeyDown(KeyCode.Escape))
         {
-            // objectToSpawnが設定されていれば、QRコードの位置と向きにオブジェクトを生成
-            if (objectToSpawn != null)
-            {
-                // オブジェクトを生成し、spawnedObjectという変数に格納
-                GameObject spawnedObject = Instantiate(objectToSpawn, trackable.transform.position, trackable.transform.rotation);
-                
-                // 生成したオブジェクトを、QRコードのIDと紐づけてリストに保存
-                spawnedObjects[trackable.Uuid] = spawnedObject;
-            }
+            // アプリケーションを終了します。
+            QuitApplication();
         }
     }
 
-    // 追跡中のものの情報（位置や向き）が更新された時に呼ばれる関数
-    private void OnTrackableUpdated(MRUK.Trackable trackable)
+    private void QuitApplication()
     {
-        // もし更新されたものがリストに保存されているQRコードなら
-        if (spawnedObjects.ContainsKey(trackable.Uuid))
-        {
-            // 対応する生成済みオブジェクトの位置と向きを、QRコードの最新情報に合わせる
-            spawnedObjects[trackable.Uuid].transform.position = trackable.transform.position;
-            spawnedObjects[trackable.Uuid].transform.rotation = trackable.transform.rotation;
-        }
-    }
-
-    // 追跡中のものが見えなくなった（削除された）時に呼ばれる関数
-    private void OnTrackableRemoved(MRUK.Trackable trackable)
-    {
-        // もし削除されたものがリストに保存されているQRコードなら
-        if (spawnedObjects.ContainsKey(trackable.Uuid))
-        {
-            // 対応する生成済みオブジェクトをシーンから破壊（削除）
-            Destroy(spawnedObjects[trackable.Uuid]);
-            // リストからも削除
-            spawnedObjects.Remove(trackable.Uuid);
-        }
+#if UNITY_EDITOR
+        // Unityエディタで実行している場合は、再生を停止します。
+        UnityEditor.EditorApplication.isPlaying = false;
+#else
+        // ビルドされたアプリケーションの場合は、アプリを終了します。
+        Application.Quit();
+#endif
     }
 }
